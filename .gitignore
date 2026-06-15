@@ -1,0 +1,48 @@
+# Recorded and processed CSI data
+CSI_data/artifacts/
+CSI_data/db/
+CSI_data/intermediates/
+CSI_data/npz_dataset/
+npz_dataset/
+*.npy
+*.npz
+*.dat
+*.csv
+*.csi
+
+# Generated plots
+Heatmap_validation_pics/
+Heatmap_validation_code/pics/
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local secrets and editor files
+.env
+*.key
+*.pem
+.vscode/
+.idea/
+
+# FeitCSI source is an embedded repository. Back up local changes as a patch.
+third_party/FeitCSI/
+!third_party/FeitCSI-local-changes.patch
+!third_party/FeitCSI-UPSTREAM.txt
+
+# Driver packages and build products
+third_party/feitcsi-packages/
+*.deb
+*.o
+*.so
+*.a
+
+# Runtime files
+core
+core.*
+*.log
+realtime_collection_adin_fix/logs
+FeitCSI_*.dat

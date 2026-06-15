@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "Cython>=3.0.10", "numpy>=1.26"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "picoscenes"
+version         = "0.1.0"
+description     = "Cython bindings for the PicoScenes Wi-Fi measurement parser"
+readme          = "README.md"
+requires-python = ">=3.8"
+authors         = [{name = "Tian Teng"}]
+dependencies    = ["numpy>=1.21.3"]
+
+[project.optional-dependencies]
+demo = [
+  "matplotlib"
+]

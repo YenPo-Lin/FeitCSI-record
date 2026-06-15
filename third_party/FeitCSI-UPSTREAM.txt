@@ -1,0 +1,7 @@
+Repository: https://github.com/KuskoSoft/FeitCSI.git
+Base commit: a86a7d3
+
+Restore:
+  git clone https://github.com/KuskoSoft/FeitCSI.git third_party/FeitCSI
+  git -C third_party/FeitCSI checkout a86a7d3
+  git -C third_party/FeitCSI apply ../FeitCSI-local-changes.patch

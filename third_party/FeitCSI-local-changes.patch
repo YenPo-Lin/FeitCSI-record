@@ -1,0 +1,392 @@
+diff --git a/.gitignore b/.gitignore
+index da9150e..3b4f677 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,9 +4,10 @@
+ /data/
+ /tmp/
+ /.vscode/
++/.deps/
+ MainWindow.glade~
+ poznamky
+ 
+ 
+ # Ignore compiled sources in any directory
+-/**/*.o
+\ No newline at end of file
++/**/*.o
+diff --git a/include/Arguments.h b/include/Arguments.h
+index fca4a2f..20e4d9d 100644
+--- a/include/Arguments.h
++++ b/include/Arguments.h
+@@ -31,9 +31,11 @@ struct Args
+ {
+     bool strict;
+     bool verbose;
++    int phy;
+     uint16_t frequency;
+     bool gui = false;
+     bool udpSocket = false;
++    uint16_t udpPort;
+     bool plot = false;
+     std::string bandwidth;
+     std::string outputFile;
+@@ -88,6 +90,7 @@ private:
+     /* The options we understand. */
+     inline static struct argp_option options[] = {
+         {"frequency", 'f', "FREQUENCY", 0, "Frequency to measure/inject CSI"},
++        {"phy", 'P', "PHY", 0, "nl80211 PHY index to control (for example 3 for phy3)"},
+         {"channel-width", 'w', "CHANNELWIDTH", 0, "Channel width to measure/inject CSI. Possible values [20|40|HT40-|80|160]"},
+         {"output-file", 'o', "FILE", 0, "Output file where measurements should be stored."},
+         {"mcs", 'm', "MCS", 0, "Mcs index [0-11]"},
+@@ -105,6 +108,7 @@ private:
+         {"plot", 'p', 0, OPTION_ARG_OPTIONAL, "Plot CSI data"},
+         {"gui", 'x', 0, OPTION_ARG_OPTIONAL, "Run application in GUI"},
+         {"udp-socket", 'u', 0, OPTION_ARG_OPTIONAL, "Run application and listen to UDP"},
++        {"udp-port", 'U', "PORT", 0, "UDP control/data port (default 8008)"},
+         {"ftm-asap", 'b', 0, OPTION_ARG_OPTIONAL, "FTM asap mode"},
+         {"ftm-burst-exp", 'q', "FTMBURSTEXP", 0, "FTM burst exponent"},
+         {"ftm-per-burst", 'e', "FTMPERBURST", 0, "FTM samples per burst"},
+@@ -117,4 +121,4 @@ private:
+         {0}};
+ };
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/include/main.h b/include/main.h
+index 920143f..36a9b19 100644
+--- a/include/main.h
++++ b/include/main.h
+@@ -19,8 +19,11 @@
+ #ifndef MAIN_H
+ #define MAIN_H
+ 
+-#define MONITOR_INTERFACE_NAME "FeitCSImon"
+-#define AP_INTERFACE_NAME "FeitCSIap"
++const char *monitorInterfaceName();
++const char *apInterfaceName();
++
++#define MONITOR_INTERFACE_NAME monitorInterfaceName()
++#define AP_INTERFACE_NAME apInterfaceName()
+ 
+ enum processor 
+ {
+@@ -30,4 +33,4 @@ enum processor
+     phaseCalibrationLinearTransform,
+ };
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/Arguments.cpp b/src/Arguments.cpp
+index ec11b9f..cb991b3 100644
+--- a/src/Arguments.cpp
++++ b/src/Arguments.cpp
+@@ -29,9 +29,11 @@ void Arguments::init()
+     Arguments::arguments = {
+         .strict = false,
+         .verbose = false,
++        .phy = -1,
+         .frequency = 2412,
+         .gui = false,
+         .udpSocket = false,
++        .udpPort = 8008,
+         .plot = false,
+         .bandwidth = "20",
+         .mcs = 0,
+@@ -75,6 +77,17 @@ error_t Arguments::parse_opt(int key, char *arg, struct argp_state *state)
+ 
+     switch (key)
+     {
++    case 'P':
++    {
++        int phy = std::atoi(arg);
++        if (phy < 0)
++        {
++            argp_failure(state, 1, 0, "PHY must be a non-negative nl80211 index");
++            exit(ARGP_ERR_UNKNOWN);
++        }
++        args->phy = phy;
++        break;
++    }
+     case 'v':
+         args->verbose = true;
+         break;
+@@ -87,6 +100,17 @@ error_t Arguments::parse_opt(int key, char *arg, struct argp_state *state)
+     case 'u':
+         args->udpSocket = true;
+         break;
++    case 'U':
++    {
++        int port = std::atoi(arg);
++        if (port < 1 || port > 65535)
++        {
++            argp_failure(state, 1, 0, "UDP port must be between 1 and 65535");
++            exit(ARGP_ERR_UNKNOWN);
++        }
++        args->udpPort = (uint16_t)port;
++        break;
++    }
+     case 'p':
+         args->plot = true;
+         break;
+@@ -383,4 +407,22 @@ error_t Arguments::parse_opt(int key, char *arg, struct argp_state *state)
+         return ARGP_ERR_UNKNOWN;
+     }
+     return 0;
+-}
+\ No newline at end of file
++}
++
++const char *monitorInterfaceName()
++{
++    static std::string name;
++    name = Arguments::arguments.phy >= 0
++        ? "fc" + std::to_string(Arguments::arguments.phy) + "mon"
++        : "FeitCSImon";
++    return name.c_str();
++}
++
++const char *apInterfaceName()
++{
++    static std::string name;
++    name = Arguments::arguments.phy >= 0
++        ? "fc" + std::to_string(Arguments::arguments.phy) + "ap"
++        : "FeitCSIap";
++    return name.c_str();
++}
+diff --git a/src/Csi.cpp b/src/Csi.cpp
+index d4c2969..03f0f2a 100644
+--- a/src/Csi.cpp
++++ b/src/Csi.cpp
+@@ -36,7 +36,7 @@ Csi::~Csi()
+ {
+     if (this->rawCsiData)
+     {
+-        delete rawCsiData;
++        delete[] rawCsiData;
+     }
+ }
+ 
+@@ -171,7 +171,7 @@ void Csi::fixCsiBug()
+     this->numSubCarriers = newSubcarrierSize;
+     this->rawHeaderData.numSubCarriers = this->numSubCarriers;
+     this->rawHeaderData.csiDataSize = newTotalSize;
+-    delete this->rawCsiData;
++    delete[] this->rawCsiData;
+     this->rawCsiData = new uint8_t[newTotalSize];
+     memcpy(this->rawCsiData, fixedCsiData, newTotalSize);
+ }
+diff --git a/src/MainController.cpp b/src/MainController.cpp
+index 29e30f5..ee22f9a 100644
+--- a/src/MainController.cpp
++++ b/src/MainController.cpp
+@@ -280,6 +280,11 @@ void MainController::initInterface()
+         // delete actual interfaces
+         for (InterfaceInfo interface : this->wifiController.interfaces)
+         {
++            if (Arguments::arguments.phy >= 0 &&
++                interface.wiphy != Arguments::arguments.phy)
++            {
++                continue;
++            }
+             if (Arguments::arguments.verbose)
+             {
+                 Logger::log(info) << "Remove interface " << interface.ifName << "\n";
+@@ -571,4 +576,4 @@ void MainController::intHandler(int dummy)
+ {
+     MainController::INSTANCE->deleteInstance();
+     exit(0);
+-}
+\ No newline at end of file
++}
+diff --git a/src/UdpSocket.cpp b/src/UdpSocket.cpp
+index 8fa3de8..4a79d6c 100644
+--- a/src/UdpSocket.cpp
++++ b/src/UdpSocket.cpp
+@@ -28,7 +28,6 @@
+ #include "Arguments.h"
+ #include "MainController.h"
+ 
+-#define PORT "8008"
+ #define BUF_SIZE 1024
+ 
+ void UdpSocket::init()
+@@ -48,7 +47,8 @@ void UdpSocket::init()
+     hints.ai_addr = NULL;
+     hints.ai_next = NULL;
+ 
+-    s = getaddrinfo(NULL, PORT, &hints, &result);
++    std::string port = std::to_string(Arguments::arguments.udpPort);
++    s = getaddrinfo(NULL, port.c_str(), &hints, &result);
+     if (s != 0)
+     {
+         Logger::log(error) << "getaddrinfo: " << gai_strerror(s) << "\n";
+@@ -149,4 +149,4 @@ void UdpSocket::send(char *buf, int size)
+     {
+         Logger::log(error) << "Error sending response \n";
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/WiFIController.cpp b/src/WiFIController.cpp
+index ac1dd98..af982e6 100644
+--- a/src/WiFIController.cpp
++++ b/src/WiFIController.cpp
+@@ -26,6 +26,7 @@
+ #include <netlink/genl/ctrl.h>
+ #include <netlink/attr.h>
+ #include <chrono>
++#include <algorithm>
+ #include <thread>
+ #include <sstream>
+ #include <iostream>
+@@ -142,13 +143,25 @@ void WiFIController::addDevice(const char *name, const nl80211_iftype type)
+         return;
+     }
+ 
++    int64_t selectedPhy = this->phys[0];
++    if (Arguments::arguments.phy >= 0)
++    {
++        auto it = std::find(this->phys.begin(), this->phys.end(), Arguments::arguments.phy);
++        if (it == this->phys.end())
++        {
++            throw std::ios_base::failure(
++                "Requested phy" + std::to_string(Arguments::arguments.phy) + " was not found\n");
++        }
++        selectedPhy = *it;
++    }
++
+     const void *settings[] = {name, &type};
+ 
+     Cmd cmd{
+         .id = NL80211_CMD_NEW_INTERFACE,
+         .idby = CIB_PHY,
+         .nlFlags = 0,
+-        .device = this->phys[0],
++        .device = selectedPhy,
+         .handler = this->processaddDeviceHandler,
+         .valid_handler = NULL,
+         .args = settings,
+@@ -838,4 +851,4 @@ int WiFIController::setApModeHandler(struct nl80211_state *state, struct nl_msg
+     return 0;
+ nla_put_failure:
+     return -ENOBUFS;
+-}
+\ No newline at end of file
++}
+diff --git a/src/WiFiCsiController.cpp b/src/WiFiCsiController.cpp
+index 9615ac2..5e50900 100644
+--- a/src/WiFiCsiController.cpp
++++ b/src/WiFiCsiController.cpp
+@@ -31,6 +31,7 @@
+ #include <filesystem>
+ #include <fstream>
+ #include <iostream>
++#include <system_error>
+ #include "main.h"
+ #include "Logger.h"
+ #include "rs.h"
+@@ -91,6 +92,7 @@ int WiFiCsiController::processListenToCsiHandler(struct nl_msg *msg, void *arg)
+ 
+             Csi *c = new Csi();
+             c->loadFromMemory(header, dataCsi);
++            bool queuedForPlot = false;
+ 
+             if (
+                 (c->channelWidth == RATE_MCS_CHAN_WIDTH_20 && Arguments::arguments.channelWidth == 20) ||
+@@ -109,7 +111,6 @@ int WiFiCsiController::processListenToCsiHandler(struct nl_msg *msg, void *arg)
+                 
+                 )
+                 {
+-                    printf("masm csi\n");
+                     if (!Arguments::arguments.strict || (Arguments::arguments.strict && (c->rawHeaderData.rateNflag & RATE_LEGACY_RATE_MSK) == Arguments::arguments.mcs))
+                     {
+                         if (Arguments::arguments.verbose) {
+@@ -125,11 +126,16 @@ int WiFiCsiController::processListenToCsiHandler(struct nl_msg *msg, void *arg)
+                             WiFiCsiController::csiQueueMutex.lock();
+                             WiFiCsiController::csiQueue.push(c);
+                             WiFiCsiController::csiQueueMutex.unlock();
++                            queuedForPlot = true;
+                         }
+                     }
+                     
+                 }
+             }
++            if (!queuedForPlot)
++            {
++                delete c;
++            }
+         }
+     }
+ 
+@@ -209,9 +215,30 @@ void WiFiCsiController::enableCsi(bool enable)
+         return;
+     }
+ 
++    std::filesystem::path selectedDevice;
++    if (Arguments::arguments.phy >= 0)
++    {
++        std::error_code ec;
++        selectedDevice = std::filesystem::canonical(
++            "/sys/class/ieee80211/phy" + std::to_string(Arguments::arguments.phy) + "/device",
++            ec);
++        if (ec)
++        {
++            throw std::ios_base::failure(
++                "Cannot resolve sysfs device for phy" +
++                std::to_string(Arguments::arguments.phy) + "\n");
++        }
++        selectedDevice = selectedDevice.filename();
++    }
++
+     bool csiEnabled = false;
+     for (const auto &dirEntry : std::filesystem::directory_iterator(baseDir))
+     {
++        if (!selectedDevice.empty() &&
++            dirEntry.path().filename() != selectedDevice)
++        {
++            continue;
++        }
+         std::filesystem::path path = dirEntry.path().string() + "/iwlmvm/csi_enabled";
+         if (std::filesystem::exists(path))
+         {
+@@ -232,4 +259,4 @@ void WiFiCsiController::enableCsi(bool enable)
+ WiFiCsiController::~WiFiCsiController()
+ {
+     this->enableCsi(false);
+-}
+\ No newline at end of file
++}
+diff --git a/src/WiFiFtmController.cpp b/src/WiFiFtmController.cpp
+index e103847..8c39b69 100644
+--- a/src/WiFiFtmController.cpp
++++ b/src/WiFiFtmController.cpp
+@@ -151,7 +151,9 @@ int WiFiFtmController::ftmHandler(struct nl80211_state *state, struct nl_msg *ms
+         NLA_PUT_U32(msg, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_160);
+         break;
+     case 320:
++#ifdef NL80211_CHAN_WIDTH_320
+         NLA_PUT_U32(msg, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_320);
++#endif
+         break;
+     }
+ 
+@@ -196,7 +198,9 @@ int WiFiFtmController::ftmResponderHandler(struct nl80211_state *state, struct n
+         NLA_PUT_U32(msg, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_160);
+         break;
+     case 320:
++#ifdef NL80211_CHAN_WIDTH_320
+         NLA_PUT_U32(msg, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_320);
++#endif
+         break;
+     }
+ 
+@@ -336,4 +340,4 @@ int WiFiFtmController::processFtmHandler(struct nl_msg *msg, void *arg)
+     }
+     
+     return NL_OK;
+-}
+\ No newline at end of file
++}
