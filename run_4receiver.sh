@@ -7,12 +7,14 @@ DEFAULT_PYTHON="/home/tonic/miniconda3/envs/ax210test/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 MODE=5
+TX_MAC=""
+BANDWIDTH_OVERRIDE=""
 BRIDGE_ARGS=()
 
 usage() {
     cat <<'EOF'
 Usage:
-  sudo -E ./run_4receiver.sh [--mode 5|6] [bridge options]
+  sudo -E ./run_4receiver.sh [--mode 5|6] [--bandwidth MHz] [--tx-mac MAC] [--print-src-mac] [bridge options]
 
 Modes:
   5  control 5520 MHz, center 5570 MHz, bandwidth 160 MHz (default)
@@ -22,6 +24,9 @@ Examples:
   sudo -E ./run_4receiver.sh
   sudo -E ./run_4receiver.sh --mode 5
   sudo -E ./run_4receiver.sh --mode 6
+  sudo -E ./run_4receiver.sh --mode 6 --bandwidth 20
+  sudo -E ./run_4receiver.sh --print-src-mac
+  sudo -E ./run_4receiver.sh --tx-mac 70:d8:23:17:7e:38
 EOF
 }
 
@@ -34,6 +39,26 @@ while (($#)); do
             fi
             MODE="$2"
             shift 2
+            ;;
+        --bandwidth)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --bandwidth"
+                exit 2
+            fi
+            BANDWIDTH_OVERRIDE="$2"
+            shift 2
+            ;;
+        --tx-mac)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --tx-mac"
+                exit 2
+            fi
+            TX_MAC="$2"
+            shift 2
+            ;;
+        --print-src-mac)
+            BRIDGE_ARGS+=(--print-src-mac)
+            shift
             ;;
         -h|--help)
             usage
@@ -59,6 +84,17 @@ case "$MODE" in
         ;;
     *)
         echo "--mode must be 5 or 6"
+        exit 2
+        ;;
+esac
+
+if [[ -n "$BANDWIDTH_OVERRIDE" ]]; then
+    BANDWIDTH="$BANDWIDTH_OVERRIDE"
+fi
+case "$BANDWIDTH" in
+    20|40|80|160) ;;
+    *)
+        echo "--bandwidth must be 20, 40, 80, or 160"
         exit 2
         ;;
 esac
@@ -154,6 +190,12 @@ done
 
 echo "[FeitCSI] Four-card publisher is running on tcp://0.0.0.0:5556"
 echo "[FeitCSI] Mode=${MODE}GHz control=${FREQUENCY}MHz center=${CENTER_FREQUENCY}MHz BW=${BANDWIDTH}MHz"
+if [[ -n "$TX_MAC" ]]; then
+    echo "[FeitCSI] TX MAC filter: $TX_MAC"
+    BRIDGE_ARGS+=(--tx-mac "$TX_MAC")
+else
+    echo "[FeitCSI] TX MAC filter: disabled"
+fi
 echo "[FeitCSI] Keep this terminal open. Press Ctrl+C only when capture is finished."
 "$PYTHON_BIN" "$ROOT/feitcsi_integration/feitcsi_bridge.py" \
     "${bridge_cards[@]}" \

@@ -9,10 +9,10 @@ import unittest
 
 import numpy as np
 
-from feitcsi_bridge import Bridge, Card, HEADER_SIZE, parse_frame
+from feitcsi_bridge import Bridge, Card, HEADER_SIZE, normalize_mac, parse_frame
 
 
-def make_payload(num_rx=2, num_tx=2, tones=3):
+def make_payload(num_rx=2, num_tx=2, tones=3, src_mac="001122334455"):
     values = np.arange(num_rx * num_tx * tones, dtype=np.int16)
     iq = np.column_stack((values, -values)).astype("<i2")
     header = bytearray(HEADER_SIZE)
@@ -22,7 +22,7 @@ def make_payload(num_rx=2, num_tx=2, tones=3):
     struct.pack_into("<BB", header, 46, num_rx, num_tx)
     struct.pack_into("<I", header, 52, tones)
     struct.pack_into("<II", header, 60, 41, 42)
-    header[68:74] = bytes.fromhex("001122334455")
+    header[68:74] = bytes.fromhex(src_mac.replace(":", "").replace("-", ""))
     struct.pack_into("<I", header, 92, 0xAABBCCDD)
     return bytes(header) + iq.tobytes()
 
@@ -44,6 +44,13 @@ class ParseFrameTest(unittest.TestCase):
     def test_rejects_short_datagram(self):
         with self.assertRaisesRegex(ValueError, "short"):
             parse_frame(b"\0" * 20)
+
+    def test_normalizes_mac(self):
+        self.assertEqual(normalize_mac("70-D8-23-17-7E-38"), "70:d8:23:17:7e:38")
+        self.assertEqual(normalize_mac("70:d8:23:17:7e:38"), "70:d8:23:17:7e:38")
+        self.assertIsNone(normalize_mac(""))
+        with self.assertRaisesRegex(ValueError, "invalid MAC"):
+            normalize_mac("70:d8:23")
 
     def test_udp_to_zmq_bridge(self):
         try:
@@ -74,6 +81,7 @@ class ParseFrameTest(unittest.TestCase):
             5570,
             160,
             "HESU",
+            tx_mac=None,
         )
         context = zmq.Context()
         subscriber = context.socket(zmq.SUB)
@@ -94,6 +102,57 @@ class ParseFrameTest(unittest.TestCase):
         self.assertEqual(meta["mcs"], 13)
         self.assertEqual(meta["sts"], 2)
         self.assertEqual(array.shape, (3, 2, 2, 1))
+
+        bridge.stop()
+        runner.join(timeout=3)
+        subscriber.close(linger=0)
+        context.term()
+        server.close()
+
+    def test_tx_mac_filter(self):
+        try:
+            import zmq
+        except ImportError:
+            self.skipTest("pyzmq is not installed")
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.bind(("127.0.0.1", 0))
+        udp_port = server.getsockname()[1]
+        port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        port_probe.bind(("127.0.0.1", 0))
+        zmq_port = port_probe.getsockname()[1]
+        port_probe.close()
+
+        def fake_feitcsi():
+            _command, client = server.recvfrom(2048)
+            time.sleep(0.3)
+            server.sendto(make_payload(src_mac="aa:bb:cc:dd:ee:ff"), client)
+            time.sleep(0.1)
+            server.sendto(make_payload(src_mac="70:d8:23:17:7e:38"), client)
+
+        fake = threading.Thread(target=fake_feitcsi, daemon=True)
+        fake.start()
+
+        bridge = Bridge(
+            f"127.0.0.1:{zmq_port}",
+            [Card("51", 3, udp_port, "csi.rx.1")],
+            5520,
+            5570,
+            160,
+            "HESU",
+            tx_mac="70-D8-23-17-7E-38",
+        )
+        context = zmq.Context()
+        subscriber = context.socket(zmq.SUB)
+        subscriber.setsockopt_string(zmq.SUBSCRIBE, "csi.rx.1")
+        subscriber.connect(f"tcp://127.0.0.1:{zmq_port}")
+        runner = threading.Thread(target=bridge.run)
+        runner.start()
+
+        self.assertTrue(subscriber.poll(4000))
+        _topic, metadata, _raw = subscriber.recv_multipart()
+        meta = json.loads(metadata)
+        self.assertEqual(meta["src_mac"], "70:d8:23:17:7e:38")
 
         bridge.stop()
         runner.join(timeout=3)

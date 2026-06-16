@@ -10,7 +10,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -41,6 +41,21 @@ class FeitCsiFrame:
     rssi2: int
     src_mac: str
     rate_n_flags: int
+
+
+def normalize_mac(mac: Optional[str]) -> Optional[str]:
+    if mac is None:
+        return None
+    cleaned = mac.strip().lower().replace("-", ":")
+    if not cleaned:
+        return None
+    parts = cleaned.split(":")
+    if len(parts) != 6 or any(len(part) != 2 for part in parts):
+        raise ValueError(f"invalid MAC address: {mac!r}")
+    try:
+        return ":".join(f"{int(part, 16):02x}" for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"invalid MAC address: {mac!r}") from exc
 
 
 def parse_frame(payload: bytes) -> FeitCsiFrame:
@@ -99,7 +114,8 @@ def parse_frame(payload: bytes) -> FeitCsiFrame:
 
 class Bridge:
     def __init__(self, bind: str, cards: Sequence[Card], frequency: int,
-                 center_frequency: int, bandwidth: int, frame_format: str):
+                 center_frequency: int, bandwidth: int, frame_format: str,
+                 tx_mac: Optional[str] = None, print_src_mac: bool = False):
         import zmq
 
         self.zmq = zmq
@@ -108,6 +124,9 @@ class Bridge:
         self.center_frequency = center_frequency
         self.bandwidth = bandwidth
         self.frame_format = frame_format
+        self.tx_mac = normalize_mac(tx_mac)
+        self.print_src_mac = print_src_mac
+        self.src_mac_last_print = {}
         self.stop_event = threading.Event()
         self.context = zmq.Context.instance()
         self.publisher = self.context.socket(zmq.PUB)
@@ -147,6 +166,19 @@ class Bridge:
                 frame = parse_frame(payload)
             except ValueError as exc:
                 print(f"[FeitCSI] NIC={card.nic_id} dropped frame: {exc}")
+                continue
+            if self.print_src_mac:
+                now = time.time()
+                key = (card.nic_id, frame.src_mac)
+                last_print = self.src_mac_last_print.get(key, 0.0)
+                if now - last_print >= 1.0:
+                    print(
+                        f"[FeitCSI] NIC={card.nic_id} observed src_mac={frame.src_mac} "
+                        f"rssi1={frame.rssi1} rssi2={frame.rssi2}",
+                        flush=True,
+                    )
+                    self.src_mac_last_print[key] = now
+            if self.tx_mac is not None and frame.src_mac != self.tx_mac:
                 continue
             rx_seq += 1
             now_ns = time.time_ns()
@@ -235,6 +267,16 @@ def main() -> None:
     parser.add_argument("--bandwidth", type=int, default=160)
     parser.add_argument("--format", default="HESU")
     parser.add_argument(
+        "--tx-mac",
+        default=None,
+        help="publish only frames whose source MAC matches this address",
+    )
+    parser.add_argument(
+        "--print-src-mac",
+        action="store_true",
+        help="print observed source MAC addresses for debugging filters",
+    )
+    parser.add_argument(
         "--card",
         action="append",
         metavar="NIC_ID:PHY:PORT:TOPIC",
@@ -264,6 +306,8 @@ def main() -> None:
         args.center_frequency,
         args.bandwidth,
         args.format,
+        args.tx_mac,
+        args.print_src_mac,
     )
     signal.signal(signal.SIGINT, bridge.stop)
     signal.signal(signal.SIGTERM, bridge.stop)
