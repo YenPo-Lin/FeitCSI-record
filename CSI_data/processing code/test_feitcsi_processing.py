@@ -22,9 +22,10 @@ class FeitCsiProcessingTest(unittest.TestCase):
             exp_name = "20260613_test"
             topics = ["1", "2", "3", "4"]
             nic_ids = ["51", "52", "53", "54"]
+            pcis = ["0000:07:00.0", "0000:08:00.0", "0000:09:00.0", "0000:0a:00.0"]
             base_ns = 1_000_000_000
 
-            for topic_index, (topic, nic_id) in enumerate(zip(topics, nic_ids)):
+            for topic_index, (topic, nic_id, pci) in enumerate(zip(topics, nic_ids, pcis)):
                 csv_dir = db_root / exp_name / f"csi.rx.{topic}"
                 array_dir = artifacts_root / exp_name / "arrays" / f"csi.rx.{topic}"
                 csv_dir.mkdir(parents=True)
@@ -43,6 +44,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
                     np.save(array_dir / filename, array)
                     rows.append({
                         "nic_id": nic_id,
+                        "pci": pci,
                         "rx_seq": frame_index + 1,
                         "rx_system_ns": (
                             base_ns
@@ -60,6 +62,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
                         handle,
                         fieldnames=[
                             "nic_id",
+                            "pci",
                             "rx_seq",
                             "rx_system_ns",
                             "array_saved",
@@ -83,6 +86,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
 
             self.assertEqual(len(matched_rows), 5)
             self.assertEqual(matched_rows[2]["topic2_array_saved"], "")
+            self.assertEqual(matched_rows[0]["topic3_pci"], "0000:09:00.0")
             self.assertEqual(int(matched_rows[0]["topic4_delta_ns"]), 150_000)
 
             merger_args = SimpleNamespace(
@@ -110,6 +114,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
                     np.all(merged["csi"][0, 0, 6:8, :] == 30 + 31j)
                 )
                 self.assertEqual(merged["frequency_offsets_hz"].shape, (512,))
+                np.testing.assert_array_equal(merged["pcis"], np.asarray(pcis))
                 self.assertAlmostEqual(
                     float(merged["frequency_offsets_hz"][0]),
                     -80_000_000,

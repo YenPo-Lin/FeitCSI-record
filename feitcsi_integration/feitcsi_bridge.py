@@ -24,6 +24,7 @@ UDP_RECEIVE_BUFFER = 50_000_000
 class Card:
     nic_id: str
     phy: int
+    pci: str
     port: int
     topic: str
 
@@ -186,6 +187,7 @@ class Bridge:
                 "source": "FeitCSI",
                 "nic_id": card.nic_id,
                 "phy": card.phy,
+                "pci": card.pci,
                 "rx_seq": rx_seq,
                 "rx_tstamp": frame.timestamp,
                 "rx_system_ns": now_ns,
@@ -279,7 +281,7 @@ def main() -> None:
     parser.add_argument(
         "--card",
         action="append",
-        metavar="NIC_ID:PHY:PORT:TOPIC",
+        metavar="NIC_ID:PHY:PCI:PORT:TOPIC",
         help="card mapping; may be specified multiple times",
     )
     args = parser.parse_args()
@@ -288,16 +290,22 @@ def main() -> None:
         cards = []
         for value in args.card:
             try:
-                nic_id, phy, port, topic = value.split(":", 3)
-                cards.append(Card(nic_id, int(phy), int(port), topic))
+                left, port, topic = value.rsplit(":", 2)
+                parts = left.split(":", 2)
+                if len(parts) == 2:
+                    nic_id, phy = parts
+                    pci = ""
+                else:
+                    nic_id, phy, pci = parts
+                cards.append(Card(nic_id, int(phy), pci, int(port), topic))
             except ValueError as exc:
                 parser.error(f"invalid --card value {value!r}: {exc}")
     else:
         cards = [
-            Card("51", 3, 8008, "csi.rx.1"),
-            Card("52", 1, 8009, "csi.rx.2"),
-            Card("53", 2, 8010, "csi.rx.3"),
-            Card("54", 4, 8011, "csi.rx.4"),
+            Card("51", 3, "0000:07:00.0", 8008, "csi.rx.1"),
+            Card("52", 1, "0000:08:00.0", 8009, "csi.rx.2"),
+            Card("53", 2, "0000:09:00.0", 8010, "csi.rx.3"),
+            Card("54", 4, "0000:0a:00.0", 8011, "csi.rx.4"),
         ]
     bridge = Bridge(
         args.bind,

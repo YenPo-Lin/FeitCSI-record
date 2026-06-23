@@ -15,6 +15,7 @@ from common_args import build_base_parser
 class Sample:
     topic: str
     nic_id: str
+    pci: str
     rx_seq: int
     rx_system_ns: int
     array_saved: str
@@ -59,6 +60,7 @@ def load_samples(db_root: str, exp_name: str, topic: str) -> List[Sample]:
                     Sample(
                         topic=topic,
                         nic_id=row.get("nic_id", ""),
+                        pci=row.get("pci", ""),
                         rx_seq=rx_seq,
                         rx_system_ns=timestamp,
                         array_saved=os.path.basename(array_saved),
@@ -117,6 +119,7 @@ def match_experiment(exp_name: str, args) -> str:
     for topic in args.topics:
         header.extend([
             f"topic{topic}_nic_id",
+            f"topic{topic}_pci",
             f"topic{topic}_rx_seq",
             f"topic{topic}_rx_system_ns",
             f"topic{topic}_delta_ns",
@@ -154,6 +157,7 @@ def match_experiment(exp_name: str, args) -> str:
             if sample is None:
                 row.update({
                     f"topic{topic}_nic_id": "",
+                    f"topic{topic}_pci": "",
                     f"topic{topic}_rx_seq": "",
                     f"topic{topic}_rx_system_ns": "",
                     f"topic{topic}_delta_ns": "",
@@ -163,6 +167,7 @@ def match_experiment(exp_name: str, args) -> str:
                 matched_counts[topic] += 1
                 row.update({
                     f"topic{topic}_nic_id": sample.nic_id,
+                    f"topic{topic}_pci": sample.pci,
                     f"topic{topic}_rx_seq": sample.rx_seq,
                     f"topic{topic}_rx_system_ns": sample.rx_system_ns,
                     f"topic{topic}_delta_ns": delta_ns,

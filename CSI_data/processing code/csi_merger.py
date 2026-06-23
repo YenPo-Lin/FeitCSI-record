@@ -225,6 +225,19 @@ def packet_loss_statistics(
     return statistics
 
 
+def topic_pcis_from_rows(rows: List[dict], topics: List[str]) -> List[str]:
+    pcis = []
+    for topic in topics:
+        pci = ""
+        key = f"topic{topic}_pci"
+        for row in rows:
+            pci = row.get(key, "")
+            if pci:
+                break
+        pcis.append(pci)
+    return pcis
+
+
 def merge_experiment(exp_name: str, args) -> Path:
     if len(args.topics) != len(args.nic_ids):
         raise ValueError("--topics and --nic-ids must contain the same number of values")
@@ -305,6 +318,7 @@ def merge_experiment(exp_name: str, args) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     per_topic_statistics = statistics[:-1]
     overall_statistics = statistics[-1]
+    pcis = topic_pcis_from_rows(rows, args.topics)
     raw_subcarrier_indices = he160_subcarrier_indices(1992)
     _, resampled_index_positions = resample_full_bandwidth(
         np.empty((1, 1, 1992), dtype=np.complex64),
@@ -324,6 +338,7 @@ def merge_experiment(exp_name: str, args) -> Path:
         delta_ns=delta_ns,
         topics=np.asarray(args.topics),
         nic_ids=np.asarray(args.nic_ids),
+        pcis=np.asarray(pcis),
         antenna_order=np.asarray(antenna_order),
         missing_policy=np.asarray(args.missing_policy),
         original_subcarrier_indices=raw_subcarrier_indices,

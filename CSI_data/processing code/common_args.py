@@ -54,7 +54,15 @@ def build_base_parser():
 
     parser.add_argument("--nic-ids", nargs='+', help="Physical NIC IDs in topic order", default=['51', '52', '53', '54'])
     parser.add_argument("--topics", nargs='+', help="ZMQ topic suffixes used in csi.rx.<topic>", default=['1', '2', '3', '4'])
-    parser.add_argument("--antenna-order", nargs='+', help="List defining the antenna order for merged CSI arrays", default=['0', '1', '2', '3', '5', '4', '6', '7'])
+    parser.add_argument(
+        "--antenna-order",
+        nargs='+',
+        help=(
+            "List defining the antenna order for merged CSI arrays. Default maps "
+            "topics 1,3,4,2 to physical Rx1..Rx8."
+        ),
+        default=['0', '1', '4', '5', '6', '7', '2', '3'],
+    )
     parser.add_argument(
         "--subcarriers",
         type=int,

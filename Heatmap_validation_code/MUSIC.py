@@ -7,6 +7,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = lambda iterable, **kwargs: iterable
+
+try:
     from .load_npz import load_csi_npz
 except ImportError:
     from load_npz import load_csi_npz
@@ -44,17 +49,26 @@ def relaunch_with_gpu_python_if_needed(device):
     )
 
 
+def _resolve_Sdim(args, Rxx, eig_val, label=""):
+    if getattr(args, "Sdim", None) is not None:
+        return max(1, min(int(args.Sdim), eig_val.shape[0] - 1))
+
+    threshold = np.median(eig_val)
+    Sdim = int(np.sum(eig_val > threshold))
+    return max(1, min(Sdim, eig_val.shape[0] - 1))
+
+
 class Preprocessing:
     def __init__(self, csi, fs):
         self.csi = csi
         self.fs = fs
 
-    def self_sanitize(x):
+    def self_sanitize(self, x):
         mag = np.abs(x)
         mag[mag == 0] = 1
         return x * np.conj(x) / mag
     
-    def MA(csi_amp, window_size):
+    def MA(self, csi_amp, window_size):
         window_size = max(1, int(round(window_size)))
         half = window_size // 2
         x = np.asarray(csi_amp)
@@ -68,372 +82,208 @@ class Preprocessing:
     
     def preprocess(self):
         csi_pp = self.self_sanitize(self.csi)
-        csi_pp -= self.MA(csi_pp, self.fs*1.0)
+        csi_pp -= self.MA(csi_pp, self.fs * 1.0)
         return csi_pp
 
+class SteeringVector:
+    def __init__(self, args):
+        #self.args = args
+        self.rx_win = args.rx_win
+        self.subc_win = args.subc_win
+        self.time_avg_win = getattr(args, 'time_avg_win', 1.0)
+        self.dop_win = getattr(args, 'time_dop_win', getattr(args, 'dop_win', 64))
+        self.c = 3e8
+        self.f_c = args.f_c
+        self.fs = args.fs
+        self.d = getattr(args, 'antenna_spacing', getattr(args, 'd', 0.015))
+        self.subc_stride = args.subc_stride
+        self.delta_f = args.delta_f
 
+    def steering_vector_Azi(self, theta_i):
+        # ‼️ ULA
+        # Uniform linear array steering vector (standard ULA model)
+        theta_i = np.deg2rad(theta_i)
+        # 長度為 rx_win (天線數)
+        idx = np.arange(self.rx_win)
+        # 使用 sin(theta) 的相位差： exp(-1j*2*pi*(d*sin(theta)/lambda) * idx)
+        wavelength = self.c / self.f_c
+        phase = -2.0 * np.pi * (self.d * np.cos(theta_i) / wavelength) * idx
+        sv = np.exp(1j * phase)
+        return sv.flatten()
 
-class MUSIC_ToF_Dop:
-    """
-    2D MUSIC (ToF-Doppler), aligned with the validated XMUSIC convention:
-    - Snapshot flatten order: (subcarrier, time).reshape(-1)
-    - Steering: exp(-j * (2*pi*delta_f*m*tau - 2*pi*fd*t/fs))
-    - Spectrum: 1 / (1 - a^H Es Es^H a + epsilon)
-    """
+    def steering_vector_ToF(self, tau_i):
+        """
+        做了subcarrier smoothing， steering vector ToF 的長度 = subc_win 
+        """
+        sub_idx = np.arange(self.subc_win)
+        phase_tof = -2 * np.pi * self.delta_f * sub_idx[:, None] * tau_i
+        sv = np.exp(1j * phase_tof).astype(np.complex128)
+        return sv.flatten()
+    
+    def steering_vector_Azi_ToF(self, theta_i, tau_j):
+        sv_Azi = self.steering_vector_Azi(theta_i)
+        sv_ToF = self.steering_vector_ToF(tau_j)
+        # Match flattening order used when forming snapshots in `smooth_Rxx`.
+        # Snapshots are created by `sub_h.flatten()` where `sub_h` has shape (Lr, Ls)
+        # (rx-major, subcarrier-minor). So steering should be kron(sv_Azi, sv_ToF)
+        # to produce the same ordering: for each rx index, the block over subcarriers.
+        return np.kron(sv_Azi, sv_ToF)
+    
+    def steering_vector_Doppler(self, fd_i):
+        time_idx = np.arange(self.dop_win) / self.fs 
+        phase_dop = -2 * np.pi * fd_i * time_idx[:, None]
+        sv_dop = np.exp(1j * phase_dop).astype(np.complex128)
+        return sv_dop.flatten()
+
+    def steering_vector_ToF_Dop(self, tau_i, fd_j):
+        sv_ToF = self.steering_vector_ToF(tau_i)
+        sv_Dop = self.steering_vector_Doppler(fd_j)
+        return np.kron(sv_Dop, sv_ToF)
+
+class MUSIC_AoA_ToF:
     def __init__(self, args):
         self.args = args
-        self.subc_win = int(args.subc_win)
-        self.subc_stride = int(args.subc_stride)
-        self.dop_win = int(args.dop_win)
-        self.time_win = int(args.time_win)
-        self.fs = float(args.fs)
-        self.new_delta_f = float(
-            getattr(
-                args,
-                "new_delta_f",
-                float(args.delta_f) * int(args.subc_space),
-            )
-        )
-        self.epsilon = float(
-            getattr(args, "tof_dop_epsilon", getattr(args, "epsilon", 1e-5))
-        )
-        self.floor_percentile = float(getattr(args, "floor_percentile", 5.0))
+        self.pics_dir = args.pics_dir
+        self.antenna_spacing = args.antenna_spacing
+        self.subc_win = args.subc_win
+        self.rx_win = args.rx_win
+        self.rx_stride = getattr(args, 'rx_stride', 1)
+        self.time_avg_win = args.time_avg_win
+        self.fs = args.fs
+        self.tx_index = getattr(args, 'tx_index', 0)
+
+        self.theta_grid = np.arange(args.theta_min, args.theta_max + 1, args.theta_step)
         self.tau_grid = np.arange(args.tau_min, args.tau_max, args.tau_step)
-        self.fd_grid = np.arange(
-            args.fd_min,
-            args.fd_max + 0.5 * args.fd_step,
-            args.fd_step,
-        )
-        self.device = self._resolve_device(getattr(args, "device", "auto"))
-        self.last_meta = None
 
-    def _resolve_device(self, requested):
-        if requested == "cpu":
-            print("[MUSIC] Device: CPU")
-            return "cpu"
-        if torch is None:
-            if requested == "cuda":
-                raise RuntimeError(
-                    "CUDA requested but PyTorch is not installed in this Python"
-                )
-            print("[MUSIC] PyTorch unavailable; falling back to CPU")
-            return "cpu"
-        if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0)
-            print(f"[MUSIC] Device: CUDA ({device_name})")
-            return "cuda"
-        if requested == "cuda":
-            raise RuntimeError("CUDA requested but torch.cuda.is_available() is false")
-        print("[MUSIC] CUDA unavailable; falling back to CPU")
-        return "cpu"
+    def smooth_Rxx(self, CSI, frame_idx):
+        """
+        單幀 RX/Subcarrier Smoothing
+        """
+        n_frames = CSI.shape[0]
 
-    def _check_gpu_memory(self, vector_length):
-        # Complex64 covariance alone uses 8*N^2 bytes. Eigh and workspace need
-        # several copies, so use a conservative four-times estimate.
-        estimated = 4 * 8 * vector_length * vector_length
-        free_bytes, total_bytes = torch.cuda.mem_get_info()
-        print(
-            f"[MUSIC] Estimated GPU matrix/workspace: "
-            f"{estimated / 2**30:.2f} GiB; free={free_bytes / 2**30:.2f} GiB"
-        )
-        if estimated > free_bytes * 0.85:
-            raise MemoryError(
-                "Selected subc_win*dop_win is too large for available GPU memory. "
-                "Reduce --subc_win or --dop_win."
+        # window length in frames (at least 1)
+        win_frames = max(1, int(round(self.time_avg_win * self.fs)))
+        half = win_frames // 2
+        start_f = max(0, frame_idx - half)
+        end_f = min(n_frames, frame_idx + half + 1)
+        frames = range(start_f, end_f)
+
+        # peek at first selected frame to determine dimensions
+        sample = CSI[frames[0]]
+        if sample.ndim == 3:
+            # [tx, rx, subc]
+            sample = sample[self.tx_index]
+        elif sample.ndim != 2:
+            raise ValueError(f"Unsupported CSI frame dimensionality: {sample.shape}")
+
+        M_total, K = sample.shape
+
+        Lr = self.rx_win
+        Ls = self.subc_win
+        rx_stride = max(1, getattr(self, 'rx_stride', 1))
+        subc_stride = max(1, getattr(self.args, 'subc_stride', 1))
+
+        if M_total < Lr or K < Ls:
+            raise ValueError(
+                f"CSI shape {sample.shape} is smaller than Rx/subcarrier smoothing windows "
+                f"(rx_win={Lr}, subc_win={Ls})"
             )
 
-    def _estimate_signal_dimension(self, eigenvalues):
-        if self.args.Sdim is not None:
-            return int(self.args.Sdim)
+        num_rx_slides = ((M_total - Lr) // rx_stride) + 1
+        num_subc_slides = ((K - Ls) // subc_stride) + 1
 
-        values = np.maximum(np.real(eigenvalues), np.finfo(float).eps)
-        ratios = values[:-1] / values[1:]
-        dimension = int(np.argmax(ratios) + 1) if ratios.size else 1
-        print(f"[MUSIC] Estimated signal dimension={dimension}")
-        return dimension
+        num_snapshots = len(frames) * num_rx_slides * num_subc_slides
+        X = np.empty((Lr * Ls, num_snapshots), dtype=complex)
+        col = 0
 
-    def _as_time_tx_rx_subc(self, csi):
-        if csi.ndim == 3:
-            return csi[:, None, :, :]
-        if csi.ndim == 4:
-            return csi
-        raise ValueError(
-            "MUSIC_ToF_Dop expects CSI shape (T,Rx,K) or (T,Tx,Rx,K), "
-            f"got {csi.shape}"
-        )
+        for f in frames:
+            csi_frame = CSI[f]
+            if csi_frame.ndim == 3:
+                csi_frame = csi_frame[self.tx_index]
+            elif csi_frame.ndim != 2:
+                raise ValueError(f"Unsupported CSI frame shape {csi_frame.shape}")
 
-    def _select_time_context(self, csi, frame_idx):
-        total_frames = csi.shape[0]
-        context_len = min(self.time_win, total_frames)
-        frame_idx = int(np.clip(frame_idx, 0, total_frames - 1))
-        start = int(
-            np.clip(
-                frame_idx - context_len // 2,
-                0,
-                total_frames - context_len,
-            )
-        )
-        return csi[start:start + context_len], start, start + context_len
+            for i in range(num_rx_slides):
+                start_rx = i * rx_stride
+                rx_block = csi_frame[start_rx : start_rx + Lr, :]
 
-    def Rxx_smooth(self, csi, frame_idx):
-        csi = self._as_time_tx_rx_subc(csi)
-        segment, start, end = self._select_time_context(csi, frame_idx)
-        context_len, num_tx, num_rx, num_subcarriers = segment.shape
-        if context_len < self.dop_win or num_subcarriers < self.subc_win:
-            raise ValueError("Not enough CSI samples for the selected windows")
+                for j in range(num_subc_slides):
+                    start_subc = j * subc_stride
+                    sub_h = rx_block[:, start_subc : start_subc + Ls]
+                    v = sub_h.flatten()
+                    X[:, col] = v / (np.linalg.norm(v) + 1e-12)
+                    col += 1
 
-        num_time_slides = context_len - self.dop_win + 1
-        num_freq_slides = (
-            (num_subcarriers - self.subc_win) // self.subc_stride
-        ) + 1
-        vector_length = self.subc_win * self.dop_win
-        if self.device == "cuda":
-            self._check_gpu_memory(vector_length)
-            segment_backend = torch.as_tensor(
-                segment,
-                dtype=torch.complex64,
-                device="cuda",
-            )
-            covariance = torch.zeros(
-                (vector_length, vector_length),
-                dtype=torch.complex64,
-                device="cuda",
-            )
-        else:
-            segment_backend = segment
-            covariance = np.zeros(
-                (vector_length, vector_length),
-                dtype=np.complex128,
-            )
-        snapshots = 0
+        Rxx = (X @ X.conj().T) / num_snapshots
+        return Rxx
 
-        # Tx/STS and RX are independent snapshots, matching the reference.
-        for tx in range(num_tx):
-            for rx in range(num_rx):
-                for freq_slide in range(num_freq_slides):
-                    first_subcarrier = freq_slide * self.subc_stride
-                    frequency_block = segment_backend[
-                        :,
-                        tx,
-                        rx,
-                        first_subcarrier:first_subcarrier + self.subc_win,
-                    ]
-                    if self.device == "cuda":
-                        windows = frequency_block.unfold(0, self.dop_win, 1)
-                        vectors = windows.reshape(num_time_slides, vector_length)
-                        if self.args.snapshot_norm:
-                            norms = torch.linalg.vector_norm(
-                                vectors,
-                                dim=1,
-                                keepdim=True,
-                            )
-                            vectors = vectors / (norms + 1e-12)
-                        covariance += vectors.T @ vectors.conj()
-                    else:
-                        windows = np.lib.stride_tricks.sliding_window_view(
-                            frequency_block,
-                            window_shape=self.dop_win,
-                            axis=0,
-                        )
-                        vectors = windows.reshape(
-                            num_time_slides,
-                            vector_length,
-                        ).astype(np.complex128)
-                        if self.args.snapshot_norm:
-                            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-                            vectors /= norms + 1e-12
-                        covariance += vectors.T @ vectors.conj()
-                    snapshots += vectors.shape[0]
+    def cal_spectrum(self, Rxx):
+        print(f"AoA-ToF Covariance Matrix shape = {Rxx.shape}")
+        # 1. Steering vector generator
+        sv_generator = SteeringVector(self.args)
 
-        covariance /= max(snapshots, 1)
-        if self.device == "cuda":
-            covariance = (covariance + covariance.mH) / 2
-        else:
-            covariance = (covariance + covariance.conj().T) / 2
-        self.last_meta = {
-            "context": (start, end),
-            "num_tx": num_tx,
-            "num_rx": num_rx,
-            "num_freq_slides": num_freq_slides,
-            "num_time_slides": num_time_slides,
-            "num_snapshots": snapshots,
-        }
-        print(
-            f"[MUSIC] Rxx={covariance.shape}, Tx={num_tx}, RX={num_rx}, "
-            f"snapshots={snapshots}, context={start}:{end}"
-        )
-        return covariance
+        # 2. Eigendecomposition
+        eig_val, eig_vec = np.linalg.eigh(Rxx)
+        idx_order = eig_val.argsort()[::-1]
+        eig_val, eig_vec = eig_val[idx_order], eig_vec[:, idx_order]
 
-    def steering_vector(self, tau, fd):
-        subcarrier = np.arange(self.subc_win)[:, None]
-        time = (np.arange(self.dop_win) / self.fs)[None, :]
-        phase_tof = 2 * np.pi * self.new_delta_f * subcarrier * tau
-        phase_doppler = -2 * np.pi * fd * time
-        vector = np.exp(-1j * (phase_tof + phase_doppler)).reshape(-1)
-        return vector / np.sqrt(vector.size)
+        # 3. Noise subspace
+        Sdim = _resolve_Sdim(self.args, Rxx, eig_val, label=self.__class__.__name__)
+        N_dim = eig_val.shape[0] - Sdim
+        if N_dim <= 0:
+            raise ValueError("No noise subspace: check Sdim/eigenvalues")
+        E_n = eig_vec[:, -N_dim:]
 
-    def cal_spectrum(self, covariance):
-        if self.device == "cuda":
-            return self._cal_spectrum_gpu(covariance)
+        theta = self.theta_grid
+        tau = self.tau_grid
+        sv_len = Rxx.shape[0]
 
-        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        order = np.argsort(eigenvalues)[::-1]
-        eigenvalues = eigenvalues[order]
-        eigenvectors = eigenvectors[:, order]
+        # 4. Chunked projection for memory efficiency
+        PP = np.empty((len(theta), len(tau)), dtype=float)
+        total_grid = PP.size
+        chunk_size = 2048
 
-        signal_dimension = self._estimate_signal_dimension(eigenvalues)
-        signal_dimension = int(
-            np.clip(signal_dimension, 1, covariance.shape[0] - 1)
-        )
-        print(f"[MUSIC] Using signal dimension={signal_dimension} for spectrum")
-        signal_subspace = eigenvectors[:, :signal_dimension]
+        for start in tqdm(range(0, total_grid, chunk_size), desc="Calculating AoA-ToF Spectrum"):
+            end = min(start + chunk_size, total_grid)
+            SV_chunk = np.empty((end - start, sv_len), dtype=complex)
 
-        spectrum = np.empty(
-            (len(self.tau_grid), len(self.fd_grid)),
-            dtype=np.float64,
-        )
-        epsilon = self.epsilon
-        for tau_idx, tau in enumerate(self.tau_grid):
-            for fd_idx, fd in enumerate(self.fd_grid):
-                steering = self.steering_vector(tau, fd)
-                projection = steering.conj() @ signal_subspace
-                signal_power = np.real(projection @ projection.conj())
-                spectrum[tau_idx, fd_idx] = 1.0 / (
-                    max(0.0, 1.0 - signal_power) + epsilon
-                )
-        return self.tau_grid, self.fd_grid, spectrum
+            for row, flat_idx in enumerate(range(start, end)):
+                i = flat_idx // len(tau)
+                j = flat_idx % len(tau)
+                # 使用 SteeringVector 的 Azi-ToF 合成向量
+                sv = sv_generator.steering_vector_Azi_ToF(theta[i], tau[j])
+                SV_chunk[row, :] = sv
 
-    def _cal_spectrum_gpu(self, covariance):
-        eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
-        order = torch.argsort(eigenvalues, descending=True)
-        eigenvalues = eigenvalues[order]
-        eigenvectors = eigenvectors[:, order]
+            A = SV_chunk @ E_n.conj()
+            denom = np.sum(np.abs(A)**2, axis=1)
+            PP.reshape(-1)[start:end] = denom
 
-        eigenvalues_cpu = eigenvalues.detach().cpu().numpy()
-        signal_dimension = self._estimate_signal_dimension(eigenvalues_cpu)
-        signal_dimension = int(
-            np.clip(signal_dimension, 1, covariance.shape[0] - 1)
-        )
-        signal_subspace = eigenvectors[:, :signal_dimension]
+        # 5. 轉換線性頻譜並轉 dB
+        P_linear = 1.0 / (PP + 1e-12)
+        P_aoa_tof = 10 * np.log10(P_linear + 1e-12)
 
-        fd_tensor = torch.as_tensor(
-            self.fd_grid,
-            dtype=torch.float32,
-            device="cuda",
-        )
-        subcarrier = torch.arange(
-            self.subc_win,
-            dtype=torch.float32,
-            device="cuda",
-        )[None, :, None]
-        time = (
-            torch.arange(
-                self.dop_win,
-                dtype=torch.float32,
-                device="cuda",
-            )
-            / self.fs
-        )[None, None, :]
-        phase_doppler = -2 * torch.pi * fd_tensor[:, None, None] * time
+        return theta, tau, P_linear, P_aoa_tof
 
-        spectrum = np.empty(
-            (len(self.tau_grid), len(self.fd_grid)),
-            dtype=np.float32,
-        )
-        tau_chunk = max(1, int(getattr(self.args, "tau_chunk", 4)))
-        epsilon = self.epsilon
-        normalization = np.sqrt(self.subc_win * self.dop_win)
-
-        with torch.inference_mode():
-            for start in range(0, len(self.tau_grid), tau_chunk):
-                end = min(start + tau_chunk, len(self.tau_grid))
-                tau_tensor = torch.as_tensor(
-                    self.tau_grid[start:end],
-                    dtype=torch.float32,
-                    device="cuda",
-                )[:, None, None]
-                phase_tof = (
-                    2
-                    * torch.pi
-                    * self.new_delta_f
-                    * tau_tensor
-                    * subcarrier
-                )
-                phase = phase_tof[:, None, :, :] + phase_doppler[None, :, :, :]
-                steering = torch.exp(-1j * phase).reshape(
-                    (end - start) * len(self.fd_grid),
-                    -1,
-                )
-                steering /= normalization
-                projection = steering.conj() @ signal_subspace
-                signal_power = torch.sum(
-                    torch.abs(projection) ** 2,
-                    dim=1,
-                )
-                chunk_spectrum = 1.0 / (
-                    torch.clamp(1.0 - signal_power, min=0.0) + epsilon
-                )
-                spectrum[start:end] = (
-                    chunk_spectrum.reshape(end - start, len(self.fd_grid))
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-
-        return self.tau_grid, self.fd_grid, spectrum
-
-    def plot_heatmap(self, frame_idx, tau, fd, spectrum, output_path=None):
-        spectrum_db = 10 * np.log10(spectrum + 1e-12)
-        spectrum_db -= np.nanmax(spectrum_db)
-        vmin = max(
-            np.nanpercentile(spectrum_db, self.floor_percentile),
-            -self.args.dynamic_range_db,
-        )
-        if abs(vmin) < 1e-9:
-            vmin = -1.0
-
+    def plot_heatmap(self, frame_idx, theta, tau, P_aoa_tof, args=None, title="AoA-ToF"):
         fig, ax = plt.subplots(figsize=(8, 6))
-        image = ax.pcolormesh(
-            fd,
-            tau * 1e9,
-            spectrum_db,
-            cmap="jet",
-            shading="auto",
-            vmin=vmin,
-            vmax=0.0,
-        )
-        fig.colorbar(image, ax=ax, label="Relative power (dB)")
-        ax.axvline(0, color="white", linestyle="--", linewidth=1, alpha=0.6)
-        ax.set_xlabel("Doppler shift (Hz)")
-        ax.set_ylabel("ToF (ns)")
-        if self.last_meta is None:
-            title = f"ToF-Doppler MUSIC @ frame {frame_idx}"
+        c = ax.pcolormesh(tau * 1e9, theta, P_aoa_tof, cmap='jet', shading='auto')
+        fig.colorbar(c, ax=ax, label='Power (dB)')
+        ax.set_xlabel('ToF (τ) [ns]')
+        ax.set_ylabel('AoA (θ) [deg]')
+        ax.set_title(f'{title} Heatmap @ Frame {frame_idx}')
+        target_dir = getattr(self, 'pics_dir', None) or (getattr(args, 'pics_dir', None) if args is not None else None)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+            out_path = os.path.join(target_dir, f"{frame_idx:04d}_AoAToF_Heatmap.png")
+            plt.savefig(out_path, dpi=150)
         else:
-            start, end = self.last_meta["context"]
-            title = (
-                f"ToF-Doppler MUSIC @ frame {frame_idx} "
-                f"(context {start}:{end}, "
-                f"{self.last_meta['num_snapshots']} snapshots)"
-            )
-        ax.set_title(title)
-        fig.tight_layout()
-
-        if output_path is None:
-            pics_dir = Path(
-                getattr(self.args, "pics_dir", DEFAULT_PICS_DIR)
-            )
-            output_path = pics_dir / f"{frame_idx:04d}_ToFDop_Heatmap.png"
-        output_path = Path(output_path).expanduser().resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved: {output_path}")
-
-    def gen_spectrum(self, csi, frame_idx, output_path):
-        covariance = self.Rxx_smooth(csi, frame_idx)
-        tau, fd, spectrum = self.cal_spectrum(covariance)
-        self.plot_heatmap(frame_idx, tau, fd, spectrum, output_path)
-        return tau, fd, spectrum
+            # fallback: show figure
+            plt.show()
+       
+    def gen_spectrum(self, CSI, frame_idx):
+        Rxx = self.smooth_Rxx(CSI, frame_idx)
+        theta, tau, _, P_aoa_tof = self.cal_spectrum(Rxx)
+        self.plot_heatmap(frame_idx, theta, tau, P_aoa_tof, self.args)
 
 
 def build_parser():
@@ -449,106 +299,66 @@ def build_parser():
         default="amplitude",
         help="Use CSI amplitude or complex CSI (default: amplitude)",
     )
-    parser.add_argument("--fs", type=float, default=200.0)
-    parser.add_argument("--frame_idx", type=int, default=2000)
-    parser.add_argument("--Sdim", type=int, default=None)
-    parser.add_argument("--subc_win", type=int, default=64)
-    parser.add_argument("--subc_stride", type=int, default=16)
-    parser.add_argument("--subc_space", type=int, default=1)
-    parser.add_argument("--dop_win", type=int, default=64)
-    parser.add_argument("--time_win_sec", type=float, default=1.0) #for covariance matrix time-average
+    parser.add_argument("--fs", type=float, default=100.0) # sampling rate in Hz
+    parser.add_argument("--f_c", type=float, default=5.32e9) # 5.57 GHz
+    parser.add_argument("--BW", type=float, default=160e6) # 160 MHz # 160e6 / 511 = 313.112 k
+    parser.add_argument("--delta_f", type=float, default=313.112e3) # 313.112 kHz
+
+    parser.add_argument("--Sdim", type=int, default=20)
+    parser.add_argument("--antenna_spacing", type=float, default=0.015)
+    parser.add_argument("--rx_win", type=int, default=3) # for RX smoothing
+    parser.add_argument("--subc_win", type=int, default=128) # for subcarrier smoothing
+    parser.add_argument("--subc_stride", type=int, default=4)
+    parser.add_argument("--rx_stride", type=int, default=1)
+    parser.add_argument("--tx-index", type=int, default=0,
+        help="Select TX index when CSI has shape [frame, tx, rx, subcarrier]")
+    parser.add_argument("--time_dop_win", type=int, default=64) # for doppler smoothing
+    parser.add_argument("--time_avg_win", type=float, default=1.0) #for covariance matrix time-average
+    # Azimuth range    
+    parser.add_argument("--theta-min", type=float, dest="theta_min", default=0)
+    parser.add_argument("--theta-max", type=float, dest="theta_max", default=180)
+    parser.add_argument("--theta-step", type=float, dest="theta_step", default=1)
+    # Tof range
     parser.add_argument("--tau_min", type=float, default=0)
-    parser.add_argument("--tau_max", type=float, default=50e-9)
+    parser.add_argument("--tau_max", type=float, default=20e-9)
     parser.add_argument("--tau_step", type=float, default=1e-9)
+    # Doppler range
     parser.add_argument("--fd_min", type=float, default=-40.0)
     parser.add_argument("--fd_max", type=float, default=40.0)
     parser.add_argument("--fd_step", type=float, default=1.0)
-    parser.add_argument("--dynamic-range-db", type=float, default=35.0)
-    parser.add_argument("--floor-percentile", type=float, default=5.0)
+    
+    # pics directory
+    parser.add_argument("--pics_dir", type=Path, default=DEFAULT_PICS_DIR)
     parser.add_argument(
         "--device",
         choices=["auto", "cuda", "cpu"],
         default="cuda",
         help="Compute backend (default: cuda)",
     )
-    parser.add_argument(
-        "--tau-chunk",
-        type=int,
-        default=4,
-        help="Number of ToF grid points per GPU spectrum batch",
-    )
-    parser.add_argument(
-        "--no-snapshot-norm",
-        action="store_false",
-        dest="snapshot_norm",
-    )
-    parser.set_defaults(snapshot_norm=True)
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output PNG path",
-    )
     return parser
 
 
-def main():
-    args = build_parser().parse_args()
-    relaunch_with_gpu_python_if_needed(args.device)
-    if args.fs <= 0:
-        raise ValueError("--fs must be positive")
-    if args.subc_win <= 0 or args.subc_stride <= 0 or args.dop_win <= 0:
-        raise ValueError("MUSIC windows and stride must be positive")
-    if args.time_win_sec <= 0:
-        raise ValueError("--time_win_sec must be positive")
-
-    loaded = load_csi_npz(args.npz, require_frequency_spacing=True)
-    npz_path = loaded.path
-    csi = loaded.csi
-    args.delta_f = loaded.frequency_spacing_hz
-    args.new_delta_f = args.delta_f * args.subc_space
-    args.time_win = max(args.dop_win, int(round(args.time_win_sec * args.fs)))
-    args.time_win = min(args.time_win, csi.shape[0])
-    if args.frame_idx is None:
-        args.frame_idx = csi.shape[0] // 2
-
-    session_name = npz_path.stem
-    output_path = (
-        Path(args.output)
-        if args.output
-        else DEFAULT_PICS_DIR
-        / f"{session_name}_ToF_Doppler_{args.input_mode}.png"
-    )
-
-    print(f"Input: {npz_path}")
-    print(
-        f"CSI={csi.shape}, STS and RX preserved as snapshots, "
-        f"mode={args.input_mode}, fs={args.fs:.3f} Hz, "
-        f"delta_f={args.delta_f:.3f} Hz"
-    )
-
-    # Keep the validated preprocessing implementation unchanged and apply it
-    # exactly once for amplitude mode.
-    if args.input_mode == "amplitude":
-        csi = Preprocessing.self_sanitize(csi)
-        csi -= Preprocessing.MA(csi, args.fs * 1.0)
-
-    # Keep STS/Tx as independent MUSIC snapshots.
-    # csi = np.mean(csi, axis=1)
-    print(f"CSI before MUSIC: {csi.shape}")
-
-    model = MUSIC_ToF_Dop(args)
-    tau, fd, spectrum = model.gen_spectrum(
-        csi,
-        args.frame_idx,
-        output_path,
-    )
-
-    peak = np.unravel_index(np.argmax(spectrum), spectrum.shape)
-    print(
-        f"Peak: ToF={tau[peak[0]] * 1e9:.3f} ns, "
-        f"Doppler={fd[peak[1]]:.3f} Hz"
-    )
-
 
 if __name__ == "__main__":
-    main()
+    # build argument parser and parse command-line arguments
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # loading npz file
+    data = load_csi_npz(args.npz, expected_ndim=(3, 4))
+    csi = data.csi
+
+    # If input-mode == amplitude, convert complex CSI to amplitude
+    if args.input_mode == "amplitude":
+        csi = np.abs(csi)
+
+    # instantiate MUSIC and run one frame as smoke test
+    music = MUSIC_AoA_ToF(args)
+    n_frames = csi.shape[0]
+    for frame_idx in range(100, 1900, 100):
+        music.gen_spectrum(csi, frame_idx)
+        plt.close('all')  # close figures to avoid memory issues
+
+
+    
+

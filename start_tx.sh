@@ -7,20 +7,20 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FEITCSI_BIN="${FEITCSI_BIN:-$ROOT/third_party/FeitCSI/bin/app}"
 
-PCI="0000:0b:00.0"
 MODE=5
+PCI=""
+DELAY_US=10000
 FREQUENCY=5520
 BANDWIDTH=160
-DELAY_US=5000
 REPEAT=1000000
-FORMAT="HESU"
-CODING="LDPC"
 MCS=5
 STS=2
 TX_POWER=10
 ANTENNA=12
+MAC=""
+FORMAT="HESU"
+CODING="LDPC"
 LTF="4xLTF+3.2"
-MAC="70:d8:23:17:7e:38"
 VERBOSE=0
 
 usage() {
@@ -29,28 +29,24 @@ Usage:
   sudo -E ./start_tx.sh [options]
 
 Same-machine FeitCSI TX:
-  TX  = motherboard AX210, default PCI 0000:0b:00.0
+  TX  = auto-detected motherboard PCIe AX210
   RX  = four PCIe-switch AX210 cards via ./run_4receiver.sh
 
 Options:
   --mode 5|6          5 GHz or 6 GHz preset (default: 5)
-  --pci PCI_ADDR      TX PCI address (default: 0000:0b:00.0)
+  --pci PCI_ADDR      Override TX PCI address
   --frequency MHz     Primary/control frequency override
   --bandwidth MHz     Channel width: 20, 40, 80, or 160 (default: 160)
-  --delay USEC        Delay between packets, accepts 5000 or 5e3 (default: 5000)
+  --delay USEC        Delay between packets, accepts 10000 or 1e4 (default: 10000)
   --repeat COUNT      Number of packets, accepts 1000000 or 1e6 (default: 1000000)
   --mcs INDEX         HE MCS index 0-11 (default: 5)
   --sts COUNT         Spatial streams: 1 or 2 (default: 2)
   --tx-power DBM      TX power 1-22 dBm (default: 10)
   --antenna VALUE     1, 2, or 12 for both (default: 12)
-  --mac ADDRESS       Transmitter MAC
+  --mac ADDRESS       Override transmitter MAC
   --verbose           Enable FeitCSI verbose logging
   -h, --help          Show this help
 
-Examples:
-  sudo -E ./start_tx.sh
-  sudo -E ./start_tx.sh --delay 1e5 --sts 1 --antenna 1
-  sudo -E ./start_tx.sh --mode 6
 EOF
 }
 
@@ -193,6 +189,34 @@ if [[ "$ANTENNA" != "1" && "$ANTENNA" != "2" && "$ANTENNA" != "12" ]]; then
     exit 2
 fi
 
+resolve_tx_pci() {
+    local phy_path
+    local pci
+    local candidates=()
+    for phy_path in /sys/class/ieee80211/phy*; do
+        [[ -e "$phy_path" ]] || continue
+        pci="$(basename "$(readlink -f "$phy_path/device")")"
+        case "$pci" in
+            0000:00:14.3|0000:07:00.0|0000:08:00.0|0000:09:00.0|0000:0a:00.0)
+                continue
+                ;;
+        esac
+        candidates+=("$pci")
+    done
+    if ((${#candidates[@]} == 1)); then
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+    return 1
+}
+
+if [[ -z "$PCI" ]]; then
+    if ! PCI="$(resolve_tx_pci)"; then
+        echo "Cannot auto-detect TX AX210 PCI. Use --pci PCI_ADDR."
+        exit 1
+    fi
+fi
+
 phy=""
 for phy_path in /sys/class/ieee80211/phy*; do
     [[ -e "$phy_path" ]] || continue
@@ -204,6 +228,19 @@ done
 if [[ -z "$phy" ]]; then
     echo "TX AX210 not found at PCI $PCI"
     exit 1
+fi
+
+if [[ -z "$MAC" ]]; then
+    for netdev_path in /sys/class/ieee80211/phy"$phy"/device/net/*; do
+        [[ -e "$netdev_path/address" ]] || continue
+        MAC="$(<"$netdev_path/address")"
+        MAC="${MAC,,}"
+        break
+    done
+    if [[ -z "$MAC" ]]; then
+        echo "Cannot read TX MAC from PCI $PCI / phy$phy. Use --mac ADDRESS."
+        exit 1
+    fi
 fi
 
 if ! iw phy "phy$phy" channels 2>/dev/null | awk -v freq="$FREQUENCY" -v bw="$BANDWIDTH" '
@@ -232,17 +269,6 @@ if rfkill list wlan | grep -q 'Hard blocked: yes'; then
     exit 1
 fi
 
-packet_rate="$(awk -v delay="$DELAY_US" 'BEGIN {printf "%.1f", 1000000 / delay}')"
-echo "======================= FeitCSI Same-machine TX ======================="
-echo "PCI/PHY:                          $PCI / phy$phy"
-echo "Frequency | BW:                   $FREQUENCY MHz | $BANDWIDTH MHz"
-echo "Format | Coding | LTF:            $FORMAT | $CODING | $LTF"
-echo "MCS/STS | Antenna:                $MCS/$STS | $ANTENNA"
-echo "Delay | Packet rate:              $DELAY_US us | $packet_rate packets/s"
-echo "Repeat | TX power:                $REPEAT | $TX_POWER dBm"
-echo "MAC:                              $MAC"
-echo "======================================================================="
-echo "Start RX in another terminal with: sudo -E ./run_4receiver.sh --mode $MODE"
 echo "Press Ctrl+C to stop transmission."
 
 command=(

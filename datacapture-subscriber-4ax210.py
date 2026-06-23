@@ -53,6 +53,7 @@ import zmq
 PAIR_STOPPED = 1
 PAIR_RECORDING = 2
 PAIR_FOOTER = 3
+PAIR_LABEL = 4
 
 
 # 預設 CSI 來源設定：四張擴充板 AX210 都從本機 publisher 取資料
@@ -193,6 +194,7 @@ class CsvLogger:
             "recv_iso",
             "source",
             "nic_id",
+            "pci",
             "topic",
             "transition_label",
             "rx_seq",
@@ -258,6 +260,7 @@ def decode_and_save_meta_array(parts: List[bytes], st: SourceState, art_root: pa
         "recv_iso": recv_iso,
         "source": st.name,
         "nic_id": st.nic_id,
+        "pci": "",
         "topic": topic,
         "transition_label": transition,
         "error": "",
@@ -276,7 +279,7 @@ def decode_and_save_meta_array(parts: List[bytes], st: SourceState, art_root: pa
     for k in [
         "rx_seq", "rx_system_ns", "packet_seq", "packet_taskId", "dtype",
         "order", "frequency_mhz", "center_frequency_mhz", "bandwidth_mhz",
-        "src_mac",
+        "src_mac", "pci",
         "frame_format", "mcs", "sts", "coding",
     ]:
         base_row[k] = meta.get(k, "")
@@ -336,6 +339,7 @@ def init_colors():
             curses.init_pair(PAIR_STOPPED, curses.COLOR_WHITE, -1)
             curses.init_pair(PAIR_RECORDING, curses.COLOR_BLACK, curses.COLOR_GREEN)
             curses.init_pair(PAIR_FOOTER, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(PAIR_LABEL, curses.COLOR_YELLOW, -1)
             return True
     except Exception:
         pass
@@ -372,10 +376,19 @@ def draw_screen(
         state_text = "STOPPED"
         attr = (curses.color_pair(PAIR_STOPPED) | curses.A_DIM) if colors_enabled else curses.A_DIM
 
-    bar = f" Data Capture 8Rx / 4NIC — {state_text} | label={session_label} | session={session_dir or '-'} "
-
     safe_add(stdscr, 0, 0, " " * (w - 1), attr)
-    safe_add(stdscr, 0, 0, bar, attr)
+    prefix = f" Data Capture 8Rx / 4NIC — {state_text} | "
+    label_text = f"LABEL: {session_label}"
+    suffix = f" | session={session_dir or '-'} "
+    label_is_set = session_label != "untitled"
+    label_attr = (
+        curses.color_pair(PAIR_LABEL) | curses.A_BOLD
+        if colors_enabled and label_is_set
+        else (curses.A_BOLD if label_is_set else attr)
+    )
+    safe_add(stdscr, 0, 0, prefix, attr)
+    safe_add(stdscr, 0, len(prefix), label_text, label_attr)
+    safe_add(stdscr, 0, len(prefix) + len(label_text), suffix, attr)
 
     safe_add(stdscr, 1, 0, f"Log: {log_base} | Artifacts: {art_base}", curses.A_DIM)
     safe_add(
@@ -404,7 +417,7 @@ def draw_screen(
     else:
         frame_text = "Frame: waiting for metadata..."
     safe_add(stdscr, 3, 0, frame_text, curses.A_DIM)
-    safe_add(stdscr, 5, 0, " NIC_ID  RX_NAME       STATUS         LAST_MSG   PKTS     PCK/s   TOPIC", curses.A_BOLD)
+    safe_add(stdscr, 5, 0, " NIC_ID  PHY    PCI           RX_NAME       STATUS         LAST_MSG   PKTS     PCK/s", curses.A_BOLD)
 
     row = 6
     for st in states:
@@ -412,6 +425,9 @@ def draw_screen(
 
         age = fmt_age(st.last_msg_ts)
         status = st.status if not st.err_last else f"{st.status}:{st.err_last[:18]}"
+        phy = st.last_meta.get("phy", "-") if st.last_meta else "-"
+        phy_text = f"phy{phy}" if str(phy).isdigit() else str(phy)
+        pci_text = st.last_meta.get("pci", "-") if st.last_meta else "-"
 
         # 展開每張卡的 2 個 Rx chain，依序顯示為 csi.rx.1 ... csi.rx.8。
         # 實際接收仍是一張卡一個 CSI matrix，matrix 內含兩個 Rx chain。
@@ -420,8 +436,8 @@ def draw_screen(
                 break
 
             line = (
-                f" ID {st.nic_id:<3}  csi_rx_{rx_idx:<1}      "
-                f"{status:<13} {age:<9} {st.rx_count:>7}  {rate:>7.2f}  {st.rx_topic(rx_idx)}"
+                f" ID {st.nic_id:<3}  {phy_text:<5}  {pci_text:<12}  csi_rx_{rx_idx:<1}      "
+                f"{status:<13} {age:<9} {st.rx_count:>7}  {rate:>7.2f}"
             )
 
 

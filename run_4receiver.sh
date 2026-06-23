@@ -7,7 +7,7 @@ DEFAULT_PYTHON="/home/tonic/miniconda3/envs/ax210test/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 MODE=5
-TX_MAC=""
+TX_MAC="" # --tx-mac 是封包 header 裡的 src_mac filter，不是 Linux interface MAC
 BANDWIDTH_OVERRIDE=""
 BRIDGE_ARGS=()
 
@@ -162,6 +162,8 @@ resolve_phy() {
     return 1
 }
 
+# 啟動四個 FeitCSI app
+# 每張卡開一個 FeitCSI app，透過 UDP port 等 bridge 下指令和收 CSI
 for spec in \
     "51:0000:07:00.0:8008:csi.rx.1" \
     "52:0000:08:00.0:8009:csi.rx.2" \
@@ -177,7 +179,7 @@ do
     echo "[FeitCSI] Resolved NIC=$nic PCI=$pci -> phy$phy"
     "$FEITCSI_BIN" --phy "$phy" --udp-socket --udp-port "$port" &
     pids+=("$!")
-    bridge_cards+=(--card "$nic:$phy:$port:$topic")
+    bridge_cards+=(--card "$nic:$phy:$pci:$port:$topic")
 done
 
 sleep 1
