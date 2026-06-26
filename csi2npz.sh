@@ -13,7 +13,9 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 TOLERANCE_US=750
 MISSING_POLICY="interpolate"
-SUBCARRIERS=512
+SUBCARRIERS=2025
+FS=100
+DURATION_SEC="auto"
 PROCESS_ALL=0
 SESSIONS=()
 
@@ -26,13 +28,15 @@ Usage:
 Options:
   --tolerance-us VALUE        Matching tolerance in microseconds (default: 750)
   --missing-policy POLICY     interpolate, nan, or zero (default: interpolate)
-  --subcarriers COUNT         Full-160-MHz resampled points (default: 512)
+  --subcarriers COUNT         Output subcarriers (default: 2025, PicoSense-compatible)
+  --fs HZ                     Output time sampling rate (default: 100)
+  --duration-sec SEC|auto     Fixed output duration; auto rounds capture length (default: auto)
   --all                       Process every session under CSI_data/db
   -h, --help                  Show this help
 
 CSI processing:
   Removes HE-SU cyclic shift diversity phase like PicoScenes.
-  Resamples the nominal 160 MHz bandwidth to 512 equally spaced frequency points.
+  Resamples the nominal 160 MHz bandwidth to PicoSense-compatible 2025 points by default.
 
 Examples:
   ./csi2npz.sh 20260613-120000_test
@@ -56,6 +60,16 @@ while (($#)); do
         --subcarriers)
             [[ $# -ge 2 ]] || { echo "Missing value for --subcarriers"; exit 2; }
             SUBCARRIERS="$2"
+            shift 2
+            ;;
+        --fs)
+            [[ $# -ge 2 ]] || { echo "Missing value for --fs"; exit 2; }
+            FS="$2"
+            shift 2
+            ;;
+        --duration-sec)
+            [[ $# -ge 2 ]] || { echo "Missing value for --duration-sec"; exit 2; }
+            DURATION_SEC="$2"
             shift 2
             ;;
         --all)
@@ -140,7 +154,9 @@ for session in "${SESSIONS[@]}"; do
         --exp-names "$session" \
         --dataset-type rt \
         --subcarriers "$SUBCARRIERS" \
-        --missing-policy "$MISSING_POLICY"
+        --missing-policy "$MISSING_POLICY" \
+        --fs "$FS" \
+        --duration-sec "$DURATION_SEC"
 
     merged_npz="$INTERMEDIATES_ROOT/$session/merged_csi/${session}_merged.npz"
     dataset_npz="$NPZ_DATASET_ROOT/${session}.npz"

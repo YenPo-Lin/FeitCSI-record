@@ -7,6 +7,7 @@ import queue
 import signal
 import socket
 import struct
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -128,6 +129,9 @@ class Bridge:
         self.tx_mac = normalize_mac(tx_mac)
         self.print_src_mac = print_src_mac
         self.src_mac_last_print = {}
+        self.rx_counts = {card.nic_id: 0 for card in cards}
+        self.rx_last_time = {card.nic_id: 0.0 for card in cards}
+        self.stats_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.context = zmq.Context.instance()
         self.publisher = self.context.socket(zmq.PUB)
@@ -182,6 +186,9 @@ class Bridge:
             if self.tx_mac is not None and frame.src_mac != self.tx_mac:
                 continue
             rx_seq += 1
+            with self.stats_lock:
+                self.rx_counts[card.nic_id] = rx_seq
+                self.rx_last_time[card.nic_id] = time.time()
             now_ns = time.time_ns()
             meta = {
                 "source": "FeitCSI",
@@ -231,6 +238,77 @@ class Bridge:
             pass
         sock.close()
 
+    def print_startup_radio_status(self) -> None:
+        """Print whether each FeitCSI monitor interface reached the requested channel."""
+        for card in self.cards:
+            iface = f"fc{card.phy}mon"
+            try:
+                proc = subprocess.run(
+                    ["iw", "dev", iface, "info"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+            except Exception as exc:
+                print(
+                    f"[FeitCSI] WARN NIC={card.nic_id} PCI={card.pci} "
+                    f"iface={iface}: cannot check channel ({exc})",
+                    flush=True,
+                )
+                continue
+
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout).strip() or "no iw output"
+                print(
+                    f"[FeitCSI] WARN NIC={card.nic_id} PCI={card.pci} "
+                    f"iface={iface}: monitor interface not ready ({detail})",
+                    flush=True,
+                )
+                continue
+
+            channel_line = next(
+                (line.strip() for line in proc.stdout.splitlines()
+                 if line.strip().startswith("channel ")),
+                "",
+            )
+            expected_freq = f"({self.frequency} MHz)"
+            expected_bw = f"width: {self.bandwidth} MHz"
+            expected_center = f"center1: {self.center_frequency} MHz"
+            ok = (
+                expected_freq in channel_line
+                and expected_bw in channel_line
+                and (
+                    self.bandwidth == 20
+                    or expected_center in channel_line
+                )
+            )
+            level = "READY" if ok else "WARN"
+            print(
+                f"[FeitCSI] {level} NIC={card.nic_id} PCI={card.pci} "
+                f"iface={iface} {channel_line or 'channel unavailable'}",
+                flush=True,
+            )
+
+    def print_startup_frame_status(self) -> None:
+        """Print an early packet-receive sanity check for each card."""
+        with self.stats_lock:
+            counts = dict(self.rx_counts)
+        for card in self.cards:
+            count = counts.get(card.nic_id, 0)
+            if count:
+                print(
+                    f"[FeitCSI] RX OK NIC={card.nic_id} PCI={card.pci} "
+                    f"first-window frames={count}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[FeitCSI] WARN NIC={card.nic_id} PCI={card.pci} "
+                    "received no CSI frames in the first startup window",
+                    flush=True,
+                )
+
     def run(self) -> None:
         time.sleep(0.5)
 
@@ -240,9 +318,13 @@ class Bridge:
             self.threads.append(thread)
 
         # 等四張卡 run_card() 完成初始化印出
-        time.sleep(0.5)
+        time.sleep(1.5)
+        self.print_startup_radio_status()
 
         print("[ZMQ] Publisher ready. Waiting for CSI frames...", flush=True)
+
+        next_frame_check = time.time() + 5.0
+        startup_frame_status_printed = False
 
         while not self.stop_event.is_set():
             try:
@@ -251,6 +333,12 @@ class Bridge:
                 message = None
             if message is not None:
                 self.publisher.send_multipart(message)
+            if (
+                not startup_frame_status_printed
+                and time.time() >= next_frame_check
+            ):
+                self.print_startup_frame_status()
+                startup_frame_status_printed = True
 
         for thread in self.threads:
             thread.join(timeout=3)

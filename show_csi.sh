@@ -32,6 +32,7 @@ Show FeitCSI GUI amplitude/phase plots. Stop run_4receiver.sh before using this.
 
 Options:
   --nic 51|52|53|54|all  RX card to show (default: all)
+  --51|--52|--53|--54    Shortcut for --nic 51/52/53/54
   --pci PCI_ADDR         Show one card by PCI address
   --mode 5|6             5 GHz or 6 GHz preset (default: 5)
   --frequency MHz        Override control frequency
@@ -42,6 +43,7 @@ Options:
 
 Examples:
   sudo -E ./show_csi.sh
+  sudo -E ./show_csi.sh --51
   sudo -E ./show_csi.sh --nic 51
   sudo -E ./show_csi.sh --pci 0000:07:00.0
 EOF
@@ -56,6 +58,10 @@ require_value() {
 
 while (($#)); do
     case "$1" in
+        --51|--52|--53|--54)
+            TARGET_NIC="${1#--}"
+            shift
+            ;;
         --nic)
             require_value "$@"
             TARGET_NIC="$2"

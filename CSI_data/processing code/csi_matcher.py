@@ -8,7 +8,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from common_args import build_base_parser
+from PicoSense_common_args import build_base_parser
 
 
 @dataclass(frozen=True)

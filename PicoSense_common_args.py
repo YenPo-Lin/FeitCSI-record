@@ -52,23 +52,9 @@ def build_base_parser():
     parser.add_argument("--camera-ids", nargs='+', help="List of camera IDs (numeric suffix used in folder names)", default=['1', '2', '3'])
     parser.add_argument("--root-camera-id", type=int, help="Camera ID to use as root camera for triangulation", default=2)
 
-    parser.add_argument("--nic-ids", nargs='+', help="Physical NIC IDs in topic order", default=['51', '52', '53', '54'])
-    parser.add_argument("--topics", nargs='+', help="ZMQ topic suffixes used in csi.rx.<topic>", default=['1', '2', '3', '4'])
-    parser.add_argument(
-        "--antenna-order",
-        nargs='+',
-        help=(
-            "List defining the antenna order for merged CSI arrays. Default maps "
-            "topics 1,3,4,2 to physical Rx1..Rx8."
-        ),
-        default=['0', '1', '4', '5', '6', '7', '2', '3'],
-    )
-    parser.add_argument(
-        "--subcarriers",
-        type=int,
-        help="Number of subcarriers in each merged CSI file",
-        default=2025,
-    )
+    parser.add_argument("--nic-ids", nargs='+', help="List of NIC IDs (numeric suffix used in folder names)", default=['1', '2', '3', '4'])
+    parser.add_argument("--antenna-order", nargs='+', help="List defining the antenna order for merged CSI arrays", default=['0', '1', '2', '3', '5', '4', '6', '7'])
+    parser.add_argument("--subcarriers", type=int, help="Number of subcarriers in each CSI npy file", default=2025)
 
     parser.add_argument("--save-drawn-corners", action='store_true', help="Whether to save images with drawn chessboard corners during calibration")
 

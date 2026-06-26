@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-import csi_matcher
-import csi_merger
+import PicoSense_csi_matcher
+import PicoSense_csi_merger
 
 
 class FeitCsiProcessingTest(unittest.TestCase):
@@ -80,7 +80,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
                 reference_topic="1",
                 tolerance_us=300.0,
             )
-            matched_path = Path(csi_matcher.match_experiment(exp_name, matcher_args))
+            matched_path = Path(PicoSense_csi_matcher.match_experiment(exp_name, matcher_args))
             with matched_path.open(newline="", encoding="utf-8") as handle:
                 matched_rows = list(csv.DictReader(handle))
 
@@ -101,7 +101,7 @@ class FeitCsiProcessingTest(unittest.TestCase):
                 missing_policy="interpolate",
                 keep_csd=False,
             )
-            output = csi_merger.merge_experiment(exp_name, merger_args)
+            output = PicoSense_csi_merger.merge_experiment(exp_name, merger_args)
             with np.load(output) as merged:
                 self.assertEqual(merged["csi"].shape, (5, 2, 8, 512))
                 self.assertEqual(merged["valid_mask"].shape, (5, 8))
@@ -154,9 +154,9 @@ class FeitCsiProcessingTest(unittest.TestCase):
             self.assertFalse(summary_path.exists())
 
     def test_csd_removal_matches_picoscenes_rotation_without_resampling(self):
-        indices = csi_merger.he160_subcarrier_indices(1992)
+        indices = PicoSense_csi_merger.he160_subcarrier_indices(1992)
         array = np.ones((2, 1, 1992), dtype=np.complex64)
-        corrected = csi_merger.remove_csd(array, indices)
+        corrected = PicoSense_csi_merger.remove_csd(array, indices)
 
         self.assertEqual(corrected.shape, array.shape)
         np.testing.assert_allclose(corrected[0], 1 + 0j)
@@ -166,10 +166,10 @@ class FeitCsiProcessingTest(unittest.TestCase):
         np.testing.assert_allclose(corrected[1, 0], expected_sts2, rtol=1e-6)
 
     def test_resamples_full_160mhz_to_512_equal_frequency_points(self):
-        indices = csi_merger.he160_subcarrier_indices(1992)
+        indices = PicoSense_csi_merger.he160_subcarrier_indices(1992)
         values = indices.astype(np.float32) + 1j * (2 * indices.astype(np.float32))
         array = values.reshape(1, 1, 1992).astype(np.complex64)
-        resampled, target_indices = csi_merger.resample_full_bandwidth(
+        resampled, target_indices = PicoSense_csi_merger.resample_full_bandwidth(
             array,
             indices,
             512,
