@@ -7,7 +7,6 @@ DB_ROOT="$DATA_ROOT/db"
 ARTIFACTS_ROOT="$DATA_ROOT/artifacts"
 INTERMEDIATES_ROOT="$DATA_ROOT/intermediates"
 PROCESSING_ROOT="$DATA_ROOT/processing code"
-NPZ_DATASET_ROOT="$DATA_ROOT/npz_dataset"
 DEFAULT_PYTHON="/home/tonic/miniconda3/envs/ax210test/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
@@ -159,15 +158,10 @@ for session in "${SESSIONS[@]}"; do
         --duration-sec "$DURATION_SEC"
 
     merged_npz="$INTERMEDIATES_ROOT/$session/merged_csi/${session}_merged.npz"
-    dataset_npz="$NPZ_DATASET_ROOT/${session}.npz"
     if [[ ! -f "$merged_npz" ]]; then
         echo "Merged NPZ not found: $merged_npz"
         exit 1
     fi
 
-    mkdir -p "$NPZ_DATASET_ROOT"
-    cp -f -- "$merged_npz" "$dataset_npz"
-
     echo "Merged:  $merged_npz"
-    echo "Dataset: $dataset_npz"
 done
