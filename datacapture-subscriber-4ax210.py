@@ -701,8 +701,8 @@ def run(args):
 # CLI 參數設定
 def main():
     ap = argparse.ArgumentParser(description="Local 4-card CSI Data Capture with 8Rx display")
-    ap.add_argument("--log-dir", default="./CSI_data/db")
-    ap.add_argument("--out-dir", default="./CSI_data/artifacts")
+    ap.add_argument("--log-dir", default="/media/tonic/DataSSD/CSI_data_2026/db")
+    ap.add_argument("--out-dir", default="/media/tonic/DataSSD/CSI_data_2026/artifacts")
     ap.add_argument("--session-pub", default="tcp://*:60000")
     ap.add_argument("--rcvhwm", type=int, default=10000)
     ap.add_argument(

@@ -2,17 +2,19 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DATA_ROOT="$ROOT/CSI_data"
+DATA_ROOT="${CSI_DATA_ROOT:-/media/tonic/DataSSD/CSI_data_2026}"
+
 DB_ROOT="$DATA_ROOT/db"
 ARTIFACTS_ROOT="$DATA_ROOT/artifacts"
 INTERMEDIATES_ROOT="$DATA_ROOT/intermediates"
-PROCESSING_ROOT="$DATA_ROOT/processing code"
+NPZ_FILES_ROOT="$DATA_ROOT/npz_files"
+PROCESSING_ROOT="$DATA_ROOT/processing_code"
 DEFAULT_PYTHON="/home/tonic/miniconda3/envs/ax210test/bin/python"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 TOLERANCE_US=750
 MISSING_POLICY="interpolate"
-SUBCARRIERS=2025
+SUBCARRIERS=64
 FS=100
 DURATION_SEC="auto"
 PROCESS_ALL=0
@@ -27,7 +29,7 @@ Usage:
 Options:
   --tolerance-us VALUE        Matching tolerance in microseconds (default: 750)
   --missing-policy POLICY     interpolate, nan, or zero (default: interpolate)
-  --subcarriers COUNT         Output subcarriers (default: 2025, PicoSense-compatible)
+  --subcarriers COUNT         Output subcarriers (default: 64)
   --fs HZ                     Output time sampling rate (default: 100)
   --duration-sec SEC|auto     Fixed output duration; auto rounds capture length (default: auto)
   --all                       Process every session under CSI_data/db
@@ -35,7 +37,7 @@ Options:
 
 CSI processing:
   Removes HE-SU cyclic shift diversity phase like PicoScenes.
-  Resamples the nominal 160 MHz bandwidth to PicoSense-compatible 2025 points by default.
+  Resamples the nominal 160 MHz bandwidth to 64 points by default.
 
 Examples:
   ./csi2npz.sh 20260613-120000_test
@@ -163,5 +165,10 @@ for session in "${SESSIONS[@]}"; do
         exit 1
     fi
 
+    mkdir -p "$NPZ_FILES_ROOT"
+    npz_copy="$NPZ_FILES_ROOT/${session}.npz"
+    cp -f "$merged_npz" "$npz_copy"
+
     echo "Merged:  $merged_npz"
+    echo "NPZ:     $npz_copy"
 done
